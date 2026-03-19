@@ -81,6 +81,19 @@ def clean_state_dir(max_age_days: int = 7, dry_run: bool = True) -> dict:
         except (OSError, IOError):
             pass
 
+    # Clean up old context injection markers
+    context_markers_dir = state_dir / "context_injected"
+    if context_markers_dir.exists():
+        for marker in context_markers_dir.glob("*.marker"):
+            try:
+                stat = marker.stat()
+                if stat.st_mtime < cutoff:
+                    results["bytes_freed"] += stat.st_size
+                    if not dry_run:
+                        marker.unlink()
+            except (OSError, IOError):
+                pass
+
     return results
 
 
@@ -176,7 +189,7 @@ def compress_session_timeline(note_path: Path, dry_run: bool = True) -> Optional
         # Atomic write
         temp_path = note_path.with_suffix(".tmp")
         temp_path.write_text(new_content, encoding="utf-8")
-        temp_path.rename(note_path)
+        temp_path.replace(note_path)
 
     return results
 
@@ -304,7 +317,7 @@ def dedupe_inbox(inbox_path: Path = None, similarity_threshold: float = 0.7, dry
             # Atomic write
             temp_path = inbox_path.with_suffix(".tmp")
             temp_path.write_text(new_content, encoding="utf-8")
-            temp_path.rename(inbox_path)
+            temp_path.replace(inbox_path)
 
     return results
 
@@ -495,6 +508,33 @@ def run_daily_clean(
             if topic_result and topic_result["redundant_groups"]:
                 topic_result["note"] = note_path.name
                 results["topics"].append(topic_result)
+
+    # v2: Graph consolidation (decay + pruning)
+    if config.MYCELIUM_ENABLED:
+        try:
+            from .mycelium import KnowledgeGraph
+            from .mycelium.memory_dynamics import MemoryDynamics
+            graph = KnowledgeGraph(config.GRAPH_DIR)
+            graph.load()
+            dynamics = MemoryDynamics(graph)
+
+            decay_results = dynamics.apply_decay()
+            if not dry_run:
+                pruned = dynamics.prune_weak_nodes(
+                    threshold=config.MYCELIUM_PRUNE_THRESHOLD,
+                )
+                graph.save()
+                results["graph"] = {
+                    "decayed": decay_results["updated"],
+                    "pruned": len(pruned),
+                }
+            else:
+                results["graph"] = {
+                    "decayed": decay_results["updated"],
+                    "below_threshold": len(decay_results["below_threshold"]),
+                }
+        except Exception:
+            results["graph"] = None
 
     return results
 

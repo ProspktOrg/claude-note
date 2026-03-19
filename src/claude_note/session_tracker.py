@@ -1,15 +1,12 @@
 """Session state tracking with locks and debouncing."""
 
-import fcntl
-import os
-import time
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
 from . import config
 from . import models
+from .file_lock import file_lock
 
 
 def get_state_file(session_id: str) -> Path:
@@ -22,41 +19,20 @@ def get_lock_file(session_id: str) -> Path:
     return config.STATE_DIR / f"{session_id}.lock"
 
 
-@contextmanager
-def session_lock(session_id: str, timeout: float = None) -> Iterator[bool]:
+def session_lock(session_id: str, timeout: float = None) -> "Iterator[bool]":
     """
     Context manager for session locking.
 
     Yields True if lock acquired, False if timeout.
+    Uses cross-platform file_lock.
     """
     if timeout is None:
         timeout = config.LOCK_TIMEOUT
 
-    lock_file = get_lock_file(session_id)
-    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = get_lock_file(session_id)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fd = None
-    acquired = False
-    start_time = time.time()
-
-    try:
-        fd = os.open(str(lock_file), os.O_WRONLY | os.O_CREAT, 0o644)
-
-        # Try to acquire lock with timeout
-        while time.time() - start_time < timeout:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-                break
-            except BlockingIOError:
-                time.sleep(0.1)
-
-        yield acquired
-    finally:
-        if fd is not None:
-            if acquired:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+    return file_lock(lock_path, timeout=timeout)
 
 
 def load_session_state(session_id: str) -> Optional[models.SessionState]:
@@ -79,7 +55,7 @@ def save_session_state(state: models.SessionState) -> None:
     # Atomic write via temp file
     temp_file = state_file.with_suffix(".tmp")
     temp_file.write_text(state.to_json())
-    temp_file.rename(state_file)
+    temp_file.replace(state_file)
 
 
 def is_recursive_event(event: models.QueuedEvent) -> bool:
@@ -196,6 +172,7 @@ def update_session_from_events(session_id: str, events: list) -> models.SessionS
             last_event_ts=first_event.ts,
             cwd=first_event.cwd,
             transcript_path=first_event.transcript_path,
+            agent_id=getattr(first_event, "agent_id", ""),
         )
 
     processed_ids = set(state.processed_event_ids)

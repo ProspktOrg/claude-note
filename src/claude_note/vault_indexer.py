@@ -287,7 +287,7 @@ def save_index(index: VaultIndex) -> None:
     # Atomic write
     temp_path = index_path.with_suffix(".tmp")
     temp_path.write_text(index.to_json())
-    temp_path.rename(index_path)
+    temp_path.replace(index_path)
 
 
 def update_index(changed_files: list[Path] = None) -> VaultIndex:
@@ -449,6 +449,63 @@ def get_notes_by_tag(tag: str) -> list[NoteIndex]:
         note for note in index.notes.values()
         if tag in note.tags
     ]
+
+
+def filter_index_for_agent(
+    index: VaultIndex,
+    primary_folders: list[str] = None,
+    secondary_folders: list[str] = None,
+    excluded_folders: list[str] = None,
+) -> VaultIndex:
+    """
+    Filter vault index to notes accessible by an agent (v2).
+
+    Args:
+        index: Full vault index
+        primary_folders: Agent's primary folders
+        secondary_folders: Agent's secondary folders
+        excluded_folders: Folders to exclude
+
+    Returns:
+        Filtered VaultIndex
+    """
+    primary_folders = primary_folders or []
+    secondary_folders = secondary_folders or []
+    excluded_folders = excluded_folders or []
+
+    if not primary_folders and not secondary_folders:
+        return index  # No filtering
+
+    allowed_folders = primary_folders + secondary_folders
+    filtered = VaultIndex(last_full_scan=index.last_full_scan)
+
+    for path, note in index.notes.items():
+        normalized = path.replace("\\", "/")
+
+        # Check exclusions first
+        excluded = False
+        for ef in excluded_folders:
+            if normalized.startswith(ef.replace("\\", "/").strip("/")):
+                excluded = True
+                break
+        if excluded:
+            continue
+
+        # Check if in allowed folders (or hub/root)
+        allowed = False
+        for af in allowed_folders:
+            if normalized.startswith(af.replace("\\", "/").strip("/")):
+                allowed = True
+                break
+
+        # Always allow _hub/ and root-level notes
+        if normalized.startswith("_hub/") or "/" not in normalized:
+            allowed = True
+
+        if allowed:
+            filtered.notes[path] = note
+
+    return filtered
 
 
 def get_index_summary() -> dict:

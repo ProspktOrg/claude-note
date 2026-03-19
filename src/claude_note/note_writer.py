@@ -21,11 +21,27 @@ def get_note_filename(state: models.SessionState) -> str:
     # Use first 8 chars of session_id as short id
     short_id = state.session_id[:8]
 
+    # v2: Include agent_id in filename if present
+    agent_id = getattr(state, "agent_id", "")
+    if agent_id and agent_id != "default":
+        return f"{date_str}-{agent_id}-session-{short_id}.md"
+
     return f"claude-session-{date_str}-{short_id}.md"
 
 
 def get_note_path(state: models.SessionState) -> Path:
     """Get full path for session note."""
+    # v2: Use journal path if agent mode is enabled
+    if config.AGENT_ENABLED and getattr(state, "agent_id", ""):
+        from . import vault_zones
+        try:
+            dt = datetime.fromisoformat(state.first_event_ts.rstrip("Z"))
+        except (ValueError, AttributeError):
+            dt = datetime.utcnow()
+        journal_dir = vault_zones.get_journal_path(dt)
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        return journal_dir / get_note_filename(state)
+
     return config.VAULT_ROOT / get_note_filename(state)
 
 
@@ -236,6 +252,12 @@ def generate_note_content(state: models.SessionState) -> str:
     duration = calculate_duration(state)
     timeline = format_timeline(state.events)
 
+    # v2: Add agent provenance if available
+    agent_id = getattr(state, "agent_id", "")
+    agent_fm = ""
+    if agent_id and agent_id != "default":
+        agent_fm = f"\nagent: {agent_id}"
+
     # Build the note
     content = f"""---
 tags:
@@ -243,7 +265,7 @@ tags:
   - claude-note
 aliases: []
 created: {date_str}
-session_id: {state.session_id}
+session_id: {state.session_id}{agent_fm}
 ---
 
 # Claude Session {date_str}
@@ -288,7 +310,7 @@ def write_session_note(state: models.SessionState) -> Path:
     # Atomic write
     temp_path = note_path.with_suffix(".tmp")
     temp_path.write_text(content)
-    temp_path.rename(note_path)
+    temp_path.replace(note_path)
 
     return note_path
 
@@ -351,6 +373,6 @@ def update_session_note(state: models.SessionState) -> Path:
     # Atomic write
     temp_path = note_path.with_suffix(".tmp")
     temp_path.write_text(new_content)
-    temp_path.rename(note_path)
+    temp_path.replace(note_path)
 
     return note_path

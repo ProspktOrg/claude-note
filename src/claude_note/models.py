@@ -17,9 +17,10 @@ class QueuedEvent:
     cwd: str
     transcript_path: str
     data: dict              # Raw hook payload
+    agent_id: str = ""      # PAPERCLIP_AGENT_ID (v2)
 
     @classmethod
-    def from_hook_input(cls, hook_data: dict) -> "QueuedEvent":
+    def from_hook_input(cls, hook_data: dict, agent_id: str = "") -> "QueuedEvent":
         """Create a QueuedEvent from raw hook input."""
         ts = datetime.utcnow().isoformat() + "Z"
         session_id = hook_data.get("session_id", "unknown")
@@ -39,6 +40,7 @@ class QueuedEvent:
             cwd=cwd,
             transcript_path=transcript_path,
             data=hook_data,
+            agent_id=agent_id,
         )
 
     def to_json(self) -> str:
@@ -63,6 +65,7 @@ class SessionState:
     cwd: str = ""
     transcript_path: str = ""
     events: list = field(default_factory=list)  # List of event summaries
+    agent_id: str = ""                      # PAPERCLIP_AGENT_ID (v2)
 
     def to_json(self) -> str:
         """Serialize to JSON string."""

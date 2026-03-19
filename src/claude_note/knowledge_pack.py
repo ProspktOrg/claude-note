@@ -91,6 +91,47 @@ class NoteOp:
 
 
 @dataclass
+class CodeChange:
+    """A code change with GitNexus intelligence (v2)."""
+    symbol: str                            # "MyClass.my_method"
+    file_path: str
+    change_type: str = ""                  # "added" | "modified" | "deleted"
+    risk: str = ""                         # "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"
+    impacted_count: int = 0                # total affected symbols
+    module: str = ""                       # Leiden community/module name
+    affected_processes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        d = {
+            "symbol": self.symbol,
+            "file_path": self.file_path,
+        }
+        if self.change_type:
+            d["change_type"] = self.change_type
+        if self.risk:
+            d["risk"] = self.risk
+        if self.impacted_count:
+            d["impacted_count"] = self.impacted_count
+        if self.module:
+            d["module"] = self.module
+        if self.affected_processes:
+            d["affected_processes"] = self.affected_processes
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CodeChange":
+        return cls(
+            symbol=data.get("symbol", ""),
+            file_path=data.get("file_path", ""),
+            change_type=data.get("change_type", ""),
+            risk=data.get("risk", ""),
+            impacted_count=data.get("impacted_count", 0),
+            module=data.get("module", ""),
+            affected_processes=data.get("affected_processes", []),
+        )
+
+
+@dataclass
 class KnowledgePack:
     """Complete knowledge extraction from a session."""
     session_id: str
@@ -103,6 +144,12 @@ class KnowledgePack:
     open_questions: list[OpenQuestion] = field(default_factory=list)
     howtos: list[HowTo] = field(default_factory=list)
     note_ops: list[NoteOp] = field(default_factory=list)
+    # v2 fields
+    agent_id: str = ""                     # Which agent produced this
+    departments: list[str] = field(default_factory=list)  # Target departments
+    agent_impacts: dict = field(default_factory=dict)  # {agent_id: impact_description}
+    code_changes: list[CodeChange] = field(default_factory=list)  # GitNexus changes
+    cross_functional: bool = False         # True if affects multiple departments
 
     def to_dict(self) -> dict:
         d = {
@@ -118,6 +165,16 @@ class KnowledgePack:
         }
         if self.time:
             d["time"] = self.time
+        if self.agent_id:
+            d["agent_id"] = self.agent_id
+        if self.departments:
+            d["departments"] = self.departments
+        if self.agent_impacts:
+            d["agent_impacts"] = self.agent_impacts
+        if self.code_changes:
+            d["code_changes"] = [c.to_dict() for c in self.code_changes]
+        if self.cross_functional:
+            d["cross_functional"] = self.cross_functional
         return d
 
     def to_json(self, indent: int = 2) -> str:
@@ -136,6 +193,11 @@ class KnowledgePack:
             open_questions=[OpenQuestion.from_dict(q) for q in data.get("open_questions", [])],
             howtos=[HowTo.from_dict(h) for h in data.get("howtos", [])],
             note_ops=[NoteOp.from_dict(op) for op in data.get("note_ops", [])],
+            agent_id=data.get("agent_id", ""),
+            departments=data.get("departments", []),
+            agent_impacts=data.get("agent_impacts", {}),
+            code_changes=[CodeChange.from_dict(c) for c in data.get("code_changes", [])],
+            cross_functional=data.get("cross_functional", False),
         )
 
     @classmethod

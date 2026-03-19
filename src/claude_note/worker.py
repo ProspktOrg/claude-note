@@ -113,7 +113,7 @@ def update_session_summary(state: models.SessionState, pack, logger: logging.Log
         # Write atomically
         temp_path = note_path.with_suffix(".tmp")
         temp_path.write_text(new_content, encoding="utf-8")
-        temp_path.rename(note_path)
+        temp_path.replace(note_path)
 
         logger.info(f"Updated session summary: {pack.title}")
         return True
@@ -142,6 +142,50 @@ def run_synthesis(state: models.SessionState, logger: logging.Logger) -> bool:
         # Get vault index
         vault_index = vault_indexer.get_index()
 
+        # v2: Gather agent briefing, code intel, and graph context
+        agent_briefing = ""
+        code_intel_context = ""
+        graph_context = ""
+        agent_id = getattr(state, "agent_id", "")
+
+        if config.AGENT_ENABLED and agent_id:
+            try:
+                from . import briefing_generator
+                briefing_path = config.VAULT_ROOT / "_agents" / agent_id / "briefing.md"
+                if briefing_path.exists():
+                    agent_briefing = briefing_path.read_text(encoding="utf-8")[:4000]
+            except Exception:
+                pass
+
+        if config.GITNEXUS_ENABLED:
+            try:
+                from . import code_intel
+                enricher = code_intel.CodeIntelEnricher(state.cwd or ".")
+                intel_ctx = enricher.enrich_session(config.GITNEXUS_REF)
+                code_intel_context = enricher.format_for_prompt(intel_ctx)
+            except Exception:
+                pass
+
+        if config.MYCELIUM_ENABLED:
+            try:
+                from .mycelium import KnowledgeGraph, MyceliumRetrieval
+                graph = KnowledgeGraph(config.GRAPH_DIR)
+                graph.load()
+                retrieval = MyceliumRetrieval(graph)
+                from . import agent_config
+                profile = agent_config.get_current_agent()
+                activation = retrieval.get_activation_scores_for_agent(
+                    home_nodes=profile.home_nodes,
+                    owned_tags=profile.tags_primary,
+                )
+                if activation:
+                    top_activated = sorted(activation.items(), key=lambda x: x[1], reverse=True)[:10]
+                    graph_context = "Top activated notes:\n" + "\n".join(
+                        f"- {path} (score: {score:.2f})" for path, score in top_activated
+                    )
+            except Exception:
+                pass
+
         # Run synthesis
         logger.info(f"Synthesizing session {state.session_id[:8]}...")
         pack = synthesizer.synthesize_from_state(state, vault_index)
@@ -166,6 +210,24 @@ def run_synthesis(state: models.SessionState, logger: logging.Logger) -> bool:
         if results["errors"]:
             for err in results["errors"]:
                 logger.warning(f"Synthesis error: {err}")
+
+        # v2: Post-routing graph update
+        if config.MYCELIUM_ENABLED:
+            try:
+                from .mycelium import KnowledgeGraph
+                from .mycelium.graph_sync import GraphSynchronizer
+                graph = KnowledgeGraph(config.GRAPH_DIR)
+                graph.load()
+                session_path = note_writer.get_note_filename(state)
+                syncer = GraphSynchronizer(graph)
+                syncer.post_synthesis_sync(
+                    session_path,
+                    results.get("notes_created", []),
+                    results.get("notes_updated", []),
+                )
+                graph.save()
+            except Exception as e:
+                logger.debug(f"Graph update failed: {e}")
 
         return True
 

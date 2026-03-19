@@ -216,6 +216,9 @@ def build_synthesis_prompt(
     vault_index: vault_indexer.VaultIndex,
     cwd: str = "",
     date: str = "",
+    agent_briefing: str = "",
+    code_intel_context: str = "",
+    graph_context: str = "",
 ) -> str:
     """
     Build the prompt for synthesis.
@@ -242,6 +245,15 @@ def build_synthesis_prompt(
     max_related = config.QMD_SYNTH_MAX_NOTES
     related_context = _get_related_note_snippets(transcript, vault_index, max_notes=max_related)
 
+    # Build optional v2 sections
+    v2_sections = ""
+    if agent_briefing:
+        v2_sections += f"\n## Agent Briefing\n{agent_briefing}\n"
+    if code_intel_context:
+        v2_sections += f"\n## Code Intelligence\n{code_intel_context}\n"
+    if graph_context:
+        v2_sections += f"\n## Knowledge Graph Context\n{graph_context}\n"
+
     prompt = f"""You are extracting durable knowledge from a Claude Code session.
 
 ## Session Context
@@ -260,7 +272,7 @@ Session ID: {transcript.session_id}
 
 ## Errors Encountered
 {chr(10).join(transcript.errors) if transcript.errors else "(None)"}
-
+{v2_sections}
 ## Related Notes (semantic matches)
 {related_context}
 

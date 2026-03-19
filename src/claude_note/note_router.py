@@ -80,7 +80,7 @@ def create_note(
     # Atomic write
     temp_path = note_path.with_suffix(".tmp")
     temp_path.write_text(content, encoding="utf-8")
-    temp_path.rename(note_path)
+    temp_path.replace(note_path)
 
     return note_path
 
@@ -600,6 +600,10 @@ def apply_note_ops(pack: knowledge_pack.KnowledgePack, mode: str = "inbox", vaul
             except Exception as e:
                 results["errors"].append(f"Op error: {op.op} {op.path}: {e}")
 
+    # v2: Agent-aware routing (decisions, cross-dept propagation)
+    if mode == "route" and config.AGENT_ENABLED:
+        _route_agent_aware(pack, results, vault_root)
+
     return results
 
 
@@ -652,3 +656,54 @@ def get_inbox_entries(inbox_path: Path = None, limit: int = 10) -> list[dict]:
         })
 
     return entries
+
+
+def _route_agent_aware(
+    pack: knowledge_pack.KnowledgePack,
+    results: dict,
+    vault_root: Path,
+) -> None:
+    """
+    v2 agent-aware routing: propagate decisions and mark stale briefings.
+
+    Called after standard note_ops processing in route mode.
+    """
+    try:
+        from . import briefing_updater
+
+        # Propagate decisions to _hub/decisions-log.md
+        if pack.decisions:
+            agent_id = pack.agent_id or "unknown"
+            for decision in pack.decisions:
+                briefing_updater.propagate_decision(
+                    decision_text=decision.decision,
+                    source_agent_id=agent_id,
+                    rationale=decision.rationale,
+                    impacted_departments=pack.departments or [],
+                    vault_root=vault_root,
+                )
+
+        # Route cross-department questions
+        if pack.open_questions and pack.agent_impacts:
+            agent_id = pack.agent_id or "unknown"
+            for target_agent, impact in pack.agent_impacts.items():
+                for q in pack.open_questions:
+                    briefing_updater.propagate_cross_department_question(
+                        question=q.question,
+                        source_agent_id=agent_id,
+                        target_agent_id=target_agent,
+                        context=q.context,
+                        vault_root=vault_root,
+                    )
+
+        # Mark stale briefings for affected departments
+        if pack.departments:
+            briefing_updater.mark_stale_for_departments(
+                departments=pack.departments,
+                exclude_agent_id=pack.agent_id,
+                vault_root=vault_root,
+            )
+
+    except Exception as e:
+        logger = logging.getLogger("claude-note")
+        logger.debug(f"Agent-aware routing error: {e}")

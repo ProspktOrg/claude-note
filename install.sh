@@ -23,12 +23,13 @@ NC='\033[0m' # No Color
 CONFIG_DIR="${HOME}/.config/claude-note"
 REPO_URL="https://github.com/artemiin/claude-note.git"
 
-# Detect OS
+# Detect OS (including Git Bash / MSYS2 on Windows)
 OS="$(uname -s)"
 case "${OS}" in
-    Linux*)     OS_TYPE=linux;;
-    Darwin*)    OS_TYPE=macos;;
-    *)          OS_TYPE=unknown;;
+    Linux*)                     OS_TYPE=linux;;
+    Darwin*)                    OS_TYPE=macos;;
+    MINGW*|MSYS*|CYGWIN*)       OS_TYPE=windows;;
+    *)                          OS_TYPE=unknown;;
 esac
 
 # ASCII Art Banner
@@ -306,6 +307,27 @@ mkdir -p "${VAULT_PATH}/.claude-note/logs"
 
 echo -e "  ${GREEN}✓${NC} Created .claude-note/ directories"
 
+# v2: Company vault structure
+echo
+read -p "  Setup multi-agent company vault? [y/N] " SETUP_COMPANY
+if [[ "$SETUP_COMPANY" =~ ^[Yy] ]]; then
+    for dir in _hub _agents executive marketing sales engineering product operations journal literature; do
+        mkdir -p "${VAULT_PATH}/${dir}"
+    done
+    # Create department subdirs
+    mkdir -p "${VAULT_PATH}/executive/"{board-updates,fundraising,leadership}
+    mkdir -p "${VAULT_PATH}/marketing/"{campaigns,brand,content-strategy,analytics}
+    mkdir -p "${VAULT_PATH}/sales/"{pipeline,accounts,playbooks,pricing}
+    mkdir -p "${VAULT_PATH}/engineering/"{architecture,infrastructure,incidents,tech-decisions}
+    mkdir -p "${VAULT_PATH}/product/"{roadmap,features,user-research}
+    mkdir -p "${VAULT_PATH}/operations/"{processes,playbooks,templates}
+    mkdir -p "${VAULT_PATH}/.claude-note/graph"
+    mkdir -p "${VAULT_PATH}/.claude-note/agents"
+
+    echo -e "  ${GREEN}✓${NC} Created v2 department structure"
+    echo "  Run 'claude-note agents init' to create agent profiles"
+fi
+
 # =============================================================================
 # Setup Service
 # =============================================================================
@@ -390,9 +412,168 @@ EOF
     echo "    systemctl --user stop claude-note    # Stop worker"
     echo "    systemctl --user start claude-note   # Start worker"
     echo "    systemctl --user status claude-note  # Check status"
+elif [[ "$OS_TYPE" == "windows" ]]; then
+    # Windows Task Scheduler setup
+    TASK_NAME="ClaudeNoteWorker"
+    WINDOWS_BIN=$(cygpath -w "$CLAUDE_NOTE_BIN" 2>/dev/null || echo "$CLAUDE_NOTE_BIN")
+
+    schtasks.exe /Create /TN "$TASK_NAME" /TR "\"$WINDOWS_BIN\" worker" \
+        /SC ONLOGON /RL HIGHEST /F 2>/dev/null
+
+    if [[ $? -eq 0 ]]; then
+        schtasks.exe /Run /TN "$TASK_NAME" 2>/dev/null
+        echo -e "  ${GREEN}✓${NC} Task Scheduler entry created and started"
+        echo "  Commands:"
+        echo "    schtasks.exe /End /TN $TASK_NAME    # Stop worker"
+        echo "    schtasks.exe /Run /TN $TASK_NAME    # Start worker"
+        echo "    schtasks.exe /Delete /TN $TASK_NAME # Remove"
+    else
+        echo -e "  ${YELLOW}!${NC} Could not create Task Scheduler entry"
+        echo "  Run manually: claude-note worker"
+    fi
 else
     echo -e "  ${YELLOW}!${NC} Unknown OS - skipping service setup"
     echo "  Run manually: claude-note worker"
+fi
+
+# ============================================================================
+# Setup Classifier Timer (v2)
+# ============================================================================
+
+echo
+echo -e "${BLUE}[7.5/8]${NC} Setting up classifier timer (v2)..."
+
+read -p "  Setup classifier job (processes agent inboxes every 15 min)? [y/N] " SETUP_CLASSIFIER
+if [[ "$SETUP_CLASSIFIER" =~ ^[Yy] ]]; then
+    if [[ "$OS_TYPE" == "linux" ]]; then
+        # systemd timer
+        cat > "${HOME}/.config/systemd/user/claude-note-classifier.service" << EOF
+[Unit]
+Description=Claude Note Classifier Job
+
+[Service]
+Type=oneshot
+ExecStart=${CLAUDE_NOTE_BIN} classify
+EOF
+        cat > "${HOME}/.config/systemd/user/claude-note-classifier.timer" << EOF
+[Unit]
+Description=Run Claude Note Classifier every 15 min
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl --user daemon-reload
+        systemctl --user enable --now claude-note-classifier.timer
+        echo -e "  ${GREEN}✓${NC} Classifier timer installed (systemd)"
+
+    elif [[ "$OS_TYPE" == "macos" ]]; then
+        CLASSIFIER_PLIST="${HOME}/Library/LaunchAgents/com.claude-note.classifier.plist"
+        cat > "$CLASSIFIER_PLIST" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-note.classifier</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${CLAUDE_NOTE_BIN}</string>
+        <string>classify</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>StandardOutPath</key>
+    <string>${VAULT_PATH}/.claude-note/logs/classifier-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>${VAULT_PATH}/.claude-note/logs/classifier-stderr.log</string>
+</dict>
+</plist>
+EOF
+        launchctl load "$CLASSIFIER_PLIST" 2>/dev/null
+        echo -e "  ${GREEN}✓${NC} Classifier timer installed (launchd, every 15 min)"
+
+    elif [[ "$OS_TYPE" == "windows" ]]; then
+        schtasks.exe /Create /TN "ClaudeNoteClassifier" \
+            /TR "\"$WINDOWS_BIN\" classify" \
+            /SC MINUTE /MO 15 /F 2>/dev/null
+        echo -e "  ${GREEN}✓${NC} Classifier timer installed (Task Scheduler, every 15 min)"
+    fi
+else
+    echo "  Skipping classifier timer"
+fi
+
+# =============================================================================
+# GitNexus Code Intelligence (v2 - optional)
+# =============================================================================
+
+echo
+echo -e "${BLUE}[8/9]${NC} GitNexus code intelligence (optional)..."
+
+read -p "  Setup GitNexus code intelligence? [y/N] " SETUP_GITNEXUS
+if [[ "$SETUP_GITNEXUS" =~ ^[Yy] ]]; then
+    if command -v npx &>/dev/null; then
+        echo "  Indexing current repository with GitNexus..."
+        npx -y gitnexus@latest analyze --skills 2>/dev/null
+        if [[ $? -eq 0 ]]; then
+            echo -e "  ${GREEN}✓${NC} Repository indexed with GitNexus"
+            echo "  Generated skill files in .claude/skills/generated/"
+        else
+            echo -e "  ${YELLOW}!${NC} GitNexus indexing failed (is this a git repo?)"
+        fi
+    else
+        echo -e "  ${YELLOW}!${NC} npx not found. Install Node.js for GitNexus: https://nodejs.org/"
+    fi
+else
+    echo "  Skipping GitNexus setup"
+    echo "  To set up later: npx gitnexus analyze --skills"
+fi
+
+# =============================================================================
+# Install Claude Code Hooks
+# =============================================================================
+
+echo
+echo -e "${BLUE}[9/10]${NC} Installing Claude Code hooks..."
+
+CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
+mkdir -p "${HOME}/.claude"
+
+# Use Python to merge hooks into settings.json (jq may not be installed)
+python3 -c "
+import json, sys
+from pathlib import Path
+
+settings_path = Path('${CLAUDE_SETTINGS}')
+if settings_path.exists():
+    settings = json.loads(settings_path.read_text())
+else:
+    settings = {}
+
+hooks = settings.get('hooks', {})
+hook_entry = [{'hooks': [{'type': 'command', 'command': 'claude-note enqueue', 'timeout': 5000}]}]
+
+hooks['PostToolUse'] = hook_entry
+hooks['UserPromptSubmit'] = hook_entry
+hooks['Stop'] = hook_entry
+settings['hooks'] = hooks
+
+settings_path.write_text(json.dumps(settings, indent=2))
+print('ok')
+" 2>/dev/null
+
+if [[ $? -eq 0 ]]; then
+    echo -e "  ${GREEN}✓${NC} Hooks installed in ${CLAUDE_SETTINGS}"
+else
+    echo -e "  ${YELLOW}!${NC} Could not auto-install hooks. Add manually to ${CLAUDE_SETTINGS}:"
+    echo '     "hooks": {'
+    echo '       "PostToolUse": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 5000 }] }],'
+    echo '       "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 5000 }] }],'
+    echo '       "Stop": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 5000 }] }]'
+    echo '     }'
 fi
 
 # =============================================================================
@@ -400,7 +581,7 @@ fi
 # =============================================================================
 
 echo
-echo -e "${BLUE}[8/8]${NC} Installing Claude Code skills..."
+echo -e "${BLUE}[10/10]${NC} Installing Claude Code skills..."
 
 SKILLS_DIR="${HOME}/.claude/skills"
 mkdir -p "${SKILLS_DIR}"
@@ -429,17 +610,12 @@ BANNER
 echo -e "${NC}"
 echo -e "${BLUE}> Next steps:${NC}"
 echo
-echo "1. Add hooks to Claude Code (~/.claude/settings.json):"
-echo
-echo '   "hooks": {'
-echo '     "PostToolUse": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 5000 }] }],'
-echo '     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 5000 }] }],'
-echo '     "Stop": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 5000 }] }]'
-echo '   }'
-echo
-echo "2. Check status:"
+echo "1. Check status:"
 echo "   claude-note status"
 echo
-echo "3. View logs:"
+echo "2. View logs:"
 echo "   tail -f ${VAULT_PATH}/.claude-note/logs/worker-*.log"
+echo
+echo "3. For multi-agent setup:"
+echo "   claude-note agents init"
 echo

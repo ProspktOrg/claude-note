@@ -54,7 +54,7 @@ def _parse_simple_toml(path: Path) -> dict:
     result: dict = {}
     current_section: Optional[dict] = None
 
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
 
@@ -190,9 +190,9 @@ QUESTION_PATTERNS = [
 # =============================================================================
 
 RECURSION_MARKERS = [
-    ".claude-note",
-    "extracting durable knowledge",
-    "claude-note",
+    ".claude-note/",       # Internal state directory (not the project name)
+    ".claude-note\\",      # Windows path variant
+    "extracting durable knowledge",  # Synthesis prompt fingerprint
 ]
 
 # =============================================================================
@@ -245,6 +245,58 @@ QMD_INGEST_DEDUP_THRESHOLD = float(_get_config_value("ingest_dedup_threshold", s
 INGEST_MERGE_ENABLED = _get_config_value("ingest_merge_enabled", default=True)
 INGEST_MAX_SOURCES_PER_CONCEPT = int(_get_config_value("max_sources_per_concept", default=5))
 
+# =============================================================================
+# Agent Configuration (v2)
+# =============================================================================
+
+# Whether multi-agent mode is enabled
+AGENT_ENABLED = _get_config_value("enabled", section="agent", default=False)
+if isinstance(AGENT_ENABLED, str):
+    AGENT_ENABLED = AGENT_ENABLED.lower() == "true"
+
+# Agent ID from config -- used when PAPERCLIP_AGENT_ID env is not set
+AGENT_ID = _get_config_value("id", section="agent", default="default")
+
+# Briefing staleness threshold in hours
+AGENT_BRIEFING_STALE_HOURS = int(_get_config_value("briefing_stale_hours", section="agent", default=4))
+
+# Context budget: max notes to inject into CLAUDE.md
+AGENT_CONTEXT_BUDGET = int(_get_config_value("context_budget", section="agent", default=50))
+
+# =============================================================================
+# Mycelium Knowledge Graph Configuration (v2)
+# =============================================================================
+
+_mycelium_enabled = _get_config_value("enabled", section="mycelium", default=False)
+if isinstance(_mycelium_enabled, str):
+    _mycelium_enabled = _mycelium_enabled.lower() == "true"
+
+MYCELIUM_ENABLED = _mycelium_enabled
+
+# Spreading activation decay factor per hop
+MYCELIUM_DECAY_FACTOR = float(_get_config_value("decay_factor", section="mycelium", default=0.6))
+
+# Maximum hops for spreading activation
+MYCELIUM_MAX_HOPS = int(_get_config_value("max_hops", section="mycelium", default=3))
+
+# FSRS pruning threshold (retrieval strength below this = candidate for pruning)
+MYCELIUM_PRUNE_THRESHOLD = float(_get_config_value("prune_threshold", section="mycelium", default=0.2))
+
+# Graph persistence directory (relative to .claude-note/)
+GRAPH_DIR = CLAUDE_NOTE_DIR / "graph"
+
+# =============================================================================
+# GitNexus Code Intelligence Configuration (v2)
+# =============================================================================
+
+_gitnexus_enabled = _get_config_value("enabled", section="gitnexus", default=False)
+if isinstance(_gitnexus_enabled, str):
+    _gitnexus_enabled = _gitnexus_enabled.lower() == "true"
+
+GITNEXUS_ENABLED = _gitnexus_enabled
+
+# Git ref to compare against for change detection
+GITNEXUS_REF = _get_config_value("ref", section="gitnexus", default="HEAD~1")
 
 # =============================================================================
 # Helper Functions
@@ -255,6 +307,8 @@ def ensure_dirs():
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    if MYCELIUM_ENABLED:
+        GRAPH_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_config_summary() -> dict:
@@ -266,4 +320,7 @@ def get_config_summary() -> dict:
         "synth_model": SYNTH_MODEL,
         "open_questions_file": str(OPEN_QUESTIONS_FILE),
         "qmd_enabled": QMD_SYNTH_ENABLED,
+        "agent_enabled": AGENT_ENABLED,
+        "mycelium_enabled": MYCELIUM_ENABLED,
+        "gitnexus_enabled": GITNEXUS_ENABLED,
     }

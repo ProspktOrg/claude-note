@@ -1,13 +1,12 @@
 """Queue management for claude-note events."""
 
-import fcntl
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
 from . import config
 from . import models
+from .file_lock import append_locked
 
 
 def get_queue_file(date: Optional[datetime] = None) -> Path:
@@ -19,20 +18,12 @@ def get_queue_file(date: Optional[datetime] = None) -> Path:
 
 
 def enqueue_event(event: models.QueuedEvent) -> None:
-    """Append an event to the queue file (atomic, with file locking)."""
+    """Append an event to the queue file (atomic, with cross-platform locking)."""
     queue_file = get_queue_file()
     queue_file.parent.mkdir(parents=True, exist_ok=True)
 
     json_line = event.to_json() + "\n"
-
-    # Open file with append mode, using file locking for safety
-    fd = os.open(str(queue_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        os.write(fd, json_line.encode())
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+    append_locked(queue_file, json_line)
 
 
 def read_queue_files() -> Iterator[Path]:
@@ -49,7 +40,7 @@ def read_events(queue_file: Path) -> Iterator[models.QueuedEvent]:
     if not queue_file.exists():
         return
 
-    with open(queue_file, "r") as f:
+    with open(queue_file, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
