@@ -104,7 +104,12 @@
       "Bash(cat:*)",
       "Bash(claude-note drain:*)",
       "Bash(claude-note status:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(grep -r \"PreSession\\\\|SessionStart\\\\|SessionBegin\\\\|FirstPrompt\" /c/Users/omar6/Codes/claute-note/claude-note --include=*.py --include=*.md)",
+      "Bash(git log:*)",
+      "Bash(claude-note context:*)",
+      "Bash(claude-note index:*)",
+      "Bash(python -c \":*)"
     ]
   }
 }

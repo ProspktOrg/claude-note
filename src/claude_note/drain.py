@@ -83,6 +83,14 @@ def drain_all() -> tuple:
                 if not has_user_prompt:
                     continue
 
+                # Skip subagent sessions -- parent transcript has their work
+                is_subagent = any(
+                    e.data.get("is_subagent", False)
+                    for e in events
+                )
+                if is_subagent:
+                    continue
+
                 # Skip already-written sessions (same as worker.py)
                 if session_tracker.is_session_written(state):
                     continue

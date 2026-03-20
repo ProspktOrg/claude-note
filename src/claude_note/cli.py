@@ -264,23 +264,18 @@ def cmd_ingest(args) -> int:
 
 
 def cmd_context(args) -> int:
-    """Handle context command - inject/remove agent context in CLAUDE.md."""
+    """Handle context command.
+
+    Prints agent-scoped vault context to stdout.
+    Used as a SessionStart hook -- fires once when a session begins.
+    Claude Code captures stdout and injects it into the conversation.
+    """
     from . import context_retriever
 
-    if args.remove:
-        if context_retriever.remove_context():
-            print("Removed agent context from CLAUDE.md")
-        else:
-            print("No context block found to remove")
-        return 0
-
     agent_id = args.agent or None
-    success = context_retriever.inject_context(agent_id=agent_id)
-    if success:
-        print(f"Injected context for agent: {agent_id or 'current'}")
-    else:
-        print("Failed to inject context")
-        return 1
+    context = context_retriever.inject_context(agent_id=agent_id)
+    if context:
+        print(context)
     return 0
 
 
@@ -619,19 +614,11 @@ def main() -> int:
 
     # context command (v2)
     context_parser = subparsers.add_parser(
-        "context", help="Inject/remove agent context in vault CLAUDE.md"
-    )
-    context_parser.add_argument(
-        "--inject", action="store_true", default=True,
-        help="Inject context (default)"
-    )
-    context_parser.add_argument(
-        "--remove", action="store_true",
-        help="Remove injected context"
+        "context", help="Print agent context to stdout (used by UserPromptSubmit hook)"
     )
     context_parser.add_argument(
         "--agent", "-a",
-        help="Agent ID (default: from PAPERCLIP_AGENT_ID env)"
+        help="Agent ID (default: from env or config)"
     )
     context_parser.set_defaults(func=cmd_context)
 

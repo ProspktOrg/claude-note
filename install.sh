@@ -554,11 +554,14 @@ else:
     settings = {}
 
 hooks = settings.get('hooks', {})
-hook_entry = [{'hooks': [{'type': 'command', 'command': 'claude-note enqueue', 'timeout': 5000}]}]
+enqueue_cmd = {'type': 'command', 'command': 'claude-note enqueue', 'timeout': 5000}
+context_cmd = {'type': 'command', 'command': 'claude-note context', 'timeout': 5000}
 
-hooks['PostToolUse'] = hook_entry
-hooks['UserPromptSubmit'] = hook_entry
-hooks['Stop'] = hook_entry
+hooks['SessionStart'] = [{'hooks': [context_cmd]}]
+hooks['PostToolUse'] = [{'hooks': [enqueue_cmd]}]
+hooks['UserPromptSubmit'] = [{'hooks': [enqueue_cmd]}]
+hooks['PostCompact'] = [{'hooks': [context_cmd]}]
+hooks['Stop'] = [{'hooks': [enqueue_cmd]}]
 settings['hooks'] = hooks
 
 settings_path.write_text(json.dumps(settings, indent=2))

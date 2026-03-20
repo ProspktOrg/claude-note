@@ -251,13 +251,23 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
             # Update session state from events
             state = session_tracker.update_session_from_events(session_id, events)
 
-            # Skip synthesis/empty sessions (no user prompts)
+            # Skip sessions without user prompts
             has_user_prompt = any(
                 e.get("event") == "UserPromptSubmit"
                 for e in state.events
             )
             if not has_user_prompt:
                 logger.debug(f"Session {session_id[:8]}: no user prompt, skipping")
+                return False
+
+            # Skip subagent sessions -- their work is in the parent transcript.
+            # Hook data includes is_subagent=true and parent_session_id for subagents.
+            is_subagent = any(
+                e.data.get("is_subagent", False)
+                for e in events
+            )
+            if is_subagent:
+                logger.debug(f"Session {session_id[:8]}: subagent, skipping")
                 return False
 
             # Check if we should write now

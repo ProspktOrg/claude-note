@@ -10,30 +10,24 @@ There are two flows: **context loading** (session start) and **knowledge capture
 
 ### Session Start: Loading Context
 
-When you open Claude Code and type your first prompt, claude-note automatically injects relevant vault knowledge into `CLAUDE.md` so the session has context from day one:
+When a session starts, the `SessionStart` hook fires once. `claude-note context` prints vault knowledge to stdout, and Claude Code injects it directly into the conversation:
 
 ```
-First UserPromptSubmit hook fires
+New Claude Code session starts
         |
         v
-  claude-note enqueue
+SessionStart hook fires:
         |
-        |  1. Queue the event (always)
-        |  2. First prompt of session? --> inject context (background)
-        v
-  +---------------------+
-  | context --inject     |  (runs in background subprocess, non-blocking)
-  |                      |
-  | a. Resolve agent ID  |  PAPERCLIP_AGENT_ID / config.toml / env var
-  | b. Check briefing    |  Stale? --> regenerate via Claude CLI
-  | c. Score vault notes |  6-component scoring (tag, dept, recency,
-  |                      |    mycelium graph, semantic/qmd, hub score)
-  | d. Budget-constrain  |  High (full) / Mid (preview) / Low (link only)
-  | e. Write CLAUDE.md   |  Managed block: <!-- claude-note:agent-context -->
-  +---------------------+
-        |
-        v
-  Claude Code reads CLAUDE.md --> session has vault context
+        +-- claude-note context           (runs ONCE, ~200ms)
+                |
+                +-- Resolve agent ID        PAPERCLIP_AGENT_ID / config.toml / env var
+                +-- Check briefing          Stale? --> regenerate via Claude CLI
+                +-- Score vault notes       6-component scoring
+                +-- Budget-constrain        High (full) / Mid (preview) / Low (link)
+                +-- Print to stdout
+                        |
+                        v
+                Claude Code captures stdout --> context in conversation
 ```
 
 **The 6 scoring components** (how notes are ranked per agent):
@@ -222,6 +216,44 @@ The agent identity is resolved in this order:
 4. `"default"` fallback (single-user, no scoping)
 
 This means claude-note works identically whether you're using Paperclip, running standalone, or just want basic session logging.
+
+### Claude Code Hooks
+
+The installer writes five hooks to `~/.claude/settings.json`:
+
+| Hook | Command | Purpose |
+|------|---------|---------|
+| **SessionStart** | `claude-note context` | Inject vault context once at session start |
+| **PostToolUse** | `claude-note enqueue` | Capture every tool use |
+| **UserPromptSubmit** | `claude-note enqueue` | Capture every prompt |
+| **PostCompact** | `claude-note context` | Re-inject vault context after compaction |
+| **Stop** | `claude-note enqueue` | Capture session end, trigger synthesis |
+
+**How context injection works:** `SessionStart` fires once when a new session begins. `claude-note context` prints scored vault notes, the agent briefing, and recent decisions to stdout. Claude Code captures this stdout and injects it directly into the conversation context -- no file modification needed. `PostCompact` re-injects the same context after compaction so long sessions don't lose vault knowledge.
+
+If you need to install hooks manually:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [
+      { "type": "command", "command": "claude-note context", "timeout": 5000 }
+    ]}],
+    "PostToolUse": [{ "hooks": [
+      { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
+    ]}],
+    "UserPromptSubmit": [{ "hooks": [
+      { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
+    ]}],
+    "PostCompact": [{ "hooks": [
+      { "type": "command", "command": "claude-note context", "timeout": 5000 }
+    ]}],
+    "Stop": [{ "hooks": [
+      { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
+    ]}]
+  }
+}
+```
 
 ## Vault Structure
 

@@ -1,11 +1,17 @@
-"""Context retrieval and CLAUDE.md injection for agent sessions.
+"""Context retrieval for agent sessions.
 
-Orchestrates loading agent profile, checking briefing freshness,
-scoring notes, and injecting context into vault's CLAUDE.md.
+Builds agent-scoped context from the vault and outputs it to stdout.
+Claude Code's UserPromptSubmit hook captures stdout and injects it
+directly into the conversation context -- no CLAUDE.md modification needed.
+
+Context sources:
+1. Agent domain briefing (auto-generated, refreshed when stale)
+2. Scored vault notes (6-component relevance scoring, budget-constrained)
+3. Recent cross-department decisions
 """
 
 import re
-from datetime import datetime
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -15,7 +21,6 @@ from . import vault_zones
 from . import vault_indexer
 from . import relevance_scorer
 from . import briefing_generator
-from . import managed_blocks
 
 
 # Token estimation: ~4 chars per token
@@ -26,14 +31,6 @@ BRIEFING_BUDGET = 4000
 HIGH_NOTES_BUDGET = 4000
 MID_NOTES_BUDGET = 2000
 LOW_NOTES_BUDGET = 500
-
-# Managed block ID for agent context injection
-CONTEXT_BLOCK_ID = "agent-context"
-
-
-def _estimate_tokens(text: str) -> int:
-    """Rough token count estimation."""
-    return len(text) // CHARS_PER_TOKEN
 
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
@@ -52,10 +49,8 @@ def _format_high_note(note: relevance_scorer.NoteScore, vault_root: Path) -> str
 
     try:
         content = note_path.read_text(encoding="utf-8")
-        # Remove frontmatter for injection
         content = re.sub(r'^---\n.*?\n---\n', '', content, flags=re.DOTALL)
         content = content.strip()
-        # Truncate individual notes
         if len(content) > 2000:
             content = content[:2000] + "\n...(truncated)"
         return f"### [[{note.title}]] (score: {note.total:.2f})\n{content}\n"
@@ -70,7 +65,6 @@ def _format_mid_note(note: relevance_scorer.NoteScore, vault_root: Path) -> str:
     if note_path.exists():
         try:
             content = note_path.read_text(encoding="utf-8")
-            # Get first few paragraphs
             content = re.sub(r'^---\n.*?\n---\n', '', content, flags=re.DOTALL)
             lines = [l for l in content.strip().split("\n") if l.strip()][:5]
             preview = "\n".join(lines)
@@ -96,16 +90,8 @@ def build_agent_context(
     """
     Build complete context block for an agent session.
 
-    Args:
-        agent_id: Agent ID (defaults to current from env)
-        vault_root: Override vault root
-        include_briefing: Include domain briefing
-        include_notes: Include activated notes
-        include_decisions: Include recent cross-dept decisions
-        mycelium_scores: Pre-computed mycelium activation scores
-
-    Returns:
-        Formatted markdown context block
+    Returns formatted markdown that can be printed to stdout
+    for Claude Code hook injection, or used anywhere else.
     """
     if vault_root is None:
         vault_root = config.VAULT_ROOT
@@ -117,7 +103,7 @@ def build_agent_context(
 
     # Header
     role_title = profile.role or agent_id.replace("-", " ").title()
-    sections.append(f"## Domain Context: {role_title}")
+    sections.append(f"## Vault Context: {role_title}")
     sections.append("")
 
     # 1. Briefing
@@ -125,7 +111,6 @@ def build_agent_context(
         briefing_path = vault_zones.get_agent_briefing_path(agent_id, vault_root)
         if briefing_path.exists():
             briefing_content = briefing_path.read_text(encoding="utf-8")
-            # Strip frontmatter
             briefing_content = re.sub(r'^---\n.*?\n---\n', '', briefing_content, flags=re.DOTALL)
             briefing_content = _truncate_to_tokens(briefing_content.strip(), BRIEFING_BUDGET)
             sections.append("### Briefing")
@@ -153,18 +138,15 @@ def build_agent_context(
         if tiers["high"] or tiers["mid"] or tiers["low"]:
             sections.append("### Activated Notes")
 
-            # High tier: full content
             for note in tiers["high"]:
                 content = _format_high_note(note, vault_root)
                 sections.append(content)
 
-            # Mid tier: previews
             if tiers["mid"]:
                 sections.append("**Related:**")
                 for note in tiers["mid"]:
                     sections.append(_format_mid_note(note, vault_root))
 
-            # Low tier: just links
             if tiers["low"]:
                 low_links = ", ".join(_format_low_note(n) for n in tiers["low"])
                 sections.append(f"**See also:** {low_links}")
@@ -177,7 +159,6 @@ def build_agent_context(
         if decisions_path.exists():
             try:
                 decisions_content = decisions_path.read_text(encoding="utf-8")
-                # Extract recent entries (last 5 ### headings)
                 entries = re.findall(
                     r'(### .+?\n(?:.*?\n)*?)(?=### |\Z)',
                     decisions_content,
@@ -198,32 +179,32 @@ def build_agent_context(
 def inject_context(
     agent_id: str = None,
     vault_root: Path = None,
-    claude_md_path: Path = None,
     mycelium_scores: dict[str, float] = None,
-) -> bool:
+) -> str:
     """
-    Inject agent context into vault's CLAUDE.md as a managed block.
+    Build and return agent context for injection.
 
-    Args:
-        agent_id: Agent ID (defaults to current from env)
-        vault_root: Override vault root
-        claude_md_path: Override CLAUDE.md path (defaults to vault_root/CLAUDE.md)
-        mycelium_scores: Pre-computed mycelium activation scores
+    When called from a UserPromptSubmit hook, the caller prints
+    the returned string to stdout. Claude Code captures it and
+    injects it directly into the conversation context.
+
+    Also ensures the agent briefing is fresh (regenerates if stale).
 
     Returns:
-        True if context was injected
+        Context string, or empty string if nothing to inject.
     """
     if vault_root is None:
         vault_root = config.VAULT_ROOT
-    if claude_md_path is None:
-        claude_md_path = vault_root / "CLAUDE.md"
 
-    # Ensure briefing is fresh
     if agent_id is None:
         agent_id = agent_config.get_current_agent_id()
 
+    # Ensure briefing is fresh (only if agent mode is active)
     if agent_id != agent_config.DEFAULT_AGENT_ID:
-        briefing_generator.update_briefing(agent_id, vault_root)
+        try:
+            briefing_generator.update_briefing(agent_id, vault_root)
+        except Exception:
+            pass  # Don't fail if briefing regen fails
 
     # Build context
     context = build_agent_context(
@@ -232,37 +213,4 @@ def inject_context(
         mycelium_scores=mycelium_scores,
     )
 
-    if not context.strip():
-        return False
-
-    # Inject into CLAUDE.md
-    if not claude_md_path.exists():
-        # Create minimal CLAUDE.md
-        claude_md_path.write_text(
-            f"# Vault Knowledge\n\n"
-            f"<!-- claude-note:{CONTEXT_BLOCK_ID}:start -->\n"
-            f"{context}\n"
-            f"<!-- claude-note:{CONTEXT_BLOCK_ID}:end -->\n",
-            encoding="utf-8",
-        )
-        return True
-
-    return managed_blocks.write_managed_block(
-        claude_md_path,
-        CONTEXT_BLOCK_ID,
-        context,
-        create_if_missing=True,
-    )
-
-
-def remove_context(vault_root: Path = None, claude_md_path: Path = None) -> bool:
-    """Remove injected context from CLAUDE.md."""
-    if vault_root is None:
-        vault_root = config.VAULT_ROOT
-    if claude_md_path is None:
-        claude_md_path = vault_root / "CLAUDE.md"
-
-    if not claude_md_path.exists():
-        return False
-
-    return managed_blocks.delete_managed_block(claude_md_path, CONTEXT_BLOCK_ID)
+    return context.strip()

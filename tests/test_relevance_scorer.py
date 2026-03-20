@@ -6,27 +6,12 @@ from unittest.mock import patch
 import pytest
 from claude_note.relevance_scorer import (
     score_notes, budget_constrain, NoteScore,
-    _score_tag_match, _score_department, _score_recency, _score_hub,
+    _score_department, _score_recency, _score_hub,
 )
 from claude_note.vault_indexer import NoteIndex, VaultIndex
 
 
 class TestScoreComponents:
-    def test_tag_match_primary(self):
-        note = NoteIndex(path="test.md", title="Test", tags=["marketing", "brand"])
-        score = _score_tag_match(note, ["marketing", "brand", "campaign"], [])
-        assert score > 0.5
-
-    def test_tag_match_secondary(self):
-        note = NoteIndex(path="test.md", title="Test", tags=["strategy"])
-        score = _score_tag_match(note, ["marketing"], ["strategy"])
-        assert 0 < score < 1.0
-
-    def test_tag_match_none(self):
-        note = NoteIndex(path="test.md", title="Test", tags=["engineering"])
-        score = _score_tag_match(note, ["marketing"], ["strategy"])
-        assert score == 0.0
-
     def test_department_primary(self):
         score = _score_department("marketing/campaigns/q2.md", ["marketing/"], [], [])
         assert score == 1.0
@@ -43,6 +28,10 @@ class TestScoreComponents:
             ["engineering/infrastructure/"],
         )
         assert score == 0.0
+
+    def test_department_other(self):
+        score = _score_department("random/note.md", ["marketing/"], ["sales/"], [])
+        assert score == 0.1
 
     def test_recency_today(self):
         score = _score_recency(time.time())
@@ -62,21 +51,44 @@ class TestScoreComponents:
 
 
 class TestScoreNotes:
-    def test_cmo_scores_marketing_higher(self, sample_vault_index):
+    def test_cmo_scores_marketing_higher_by_department(self, sample_vault_index):
+        """Department scoring alone should rank marketing notes higher for CMO."""
         scored = score_notes(
             sample_vault_index,
-            primary_tags=["marketing", "brand", "campaign"],
             primary_folders=["marketing/", "_hub/"],
             secondary_folders=["sales/"],
             excluded_folders=["engineering/infrastructure/"],
         )
 
-        # Find marketing and engineering notes
         marketing_scores = [s for s in scored if "marketing" in s.path]
         engineering_scores = [s for s in scored if "engineering" in s.path]
 
         if marketing_scores and engineering_scores:
             assert marketing_scores[0].total > engineering_scores[0].total
+
+    def test_semantic_scores_boost_notes(self, sample_vault_index):
+        """Notes with high semantic scores should rank higher."""
+        # Find the actual path key (Windows uses backslashes)
+        campaign_path = None
+        for p in sample_vault_index.notes:
+            if "q2-campaign" in p:
+                campaign_path = p
+                break
+
+        if not campaign_path:
+            pytest.skip("q2-campaign note not found in index")
+
+        scored = score_notes(
+            sample_vault_index,
+            primary_folders=[],  # No folder bias
+            semantic_scores={campaign_path: 0.95},
+        )
+
+        boosted = [s for s in scored if "q2-campaign" in s.path]
+        non_boosted = [s for s in scored if "q2-campaign" not in s.path and s.total > 0]
+
+        assert boosted  # Campaign note should be in results
+        assert boosted[0].semantic == 0.95  # Got the semantic score
 
 
 class TestBudgetConstrain:

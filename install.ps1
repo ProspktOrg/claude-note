@@ -265,25 +265,23 @@ try {
         $settingsObj = New-Object PSObject
     }
 
-    $hookDef = @(
-        @{
-            hooks = @(
-                @{
-                    type = "command"
-                    command = "claude-note enqueue"
-                    timeout = 5000
-                }
-            )
-        }
-    )
+    $enqueueCmd = @{ type = "command"; command = "claude-note enqueue"; timeout = 5000 }
+    $contextCmd = @{ type = "command"; command = "claude-note context"; timeout = 5000 }
+
+    $enqueueOnly = @( @{ hooks = @( $enqueueCmd ) } )
+    $enqueueAndContext = @( @{ hooks = @( $enqueueCmd, $contextCmd ) } )
 
     if (-not ($settingsObj | Get-Member -Name "hooks" -ErrorAction SilentlyContinue)) {
         $settingsObj | Add-Member -NotePropertyName "hooks" -NotePropertyValue (New-Object PSObject) -Force
     }
 
-    $settingsObj.hooks | Add-Member -NotePropertyName "PostToolUse" -NotePropertyValue $hookDef -Force
-    $settingsObj.hooks | Add-Member -NotePropertyName "UserPromptSubmit" -NotePropertyValue $hookDef -Force
-    $settingsObj.hooks | Add-Member -NotePropertyName "Stop" -NotePropertyValue $hookDef -Force
+    $contextOnly = @( @{ hooks = @( $contextCmd ) } )
+
+    $settingsObj.hooks | Add-Member -NotePropertyName "SessionStart" -NotePropertyValue $contextOnly -Force
+    $settingsObj.hooks | Add-Member -NotePropertyName "PostToolUse" -NotePropertyValue $enqueueOnly -Force
+    $settingsObj.hooks | Add-Member -NotePropertyName "UserPromptSubmit" -NotePropertyValue $enqueueOnly -Force
+    $settingsObj.hooks | Add-Member -NotePropertyName "PostCompact" -NotePropertyValue $contextOnly -Force
+    $settingsObj.hooks | Add-Member -NotePropertyName "Stop" -NotePropertyValue $enqueueOnly -Force
 
     $jsonOut = $settingsObj | ConvertTo-Json -Depth 10
     [System.IO.File]::WriteAllText($claudeSettings, $jsonOut, (New-Object System.Text.UTF8Encoding $false))

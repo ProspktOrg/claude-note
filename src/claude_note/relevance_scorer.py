@@ -1,12 +1,11 @@
 """Relevance scoring for agent-scoped note retrieval.
 
-Scores notes using 6 weighted components:
-1. Tag match (0.30) - owned_tags boost
-2. Department path (0.15) - folder proximity
+Scores notes using 5 weighted components:
+1. Semantic/qmd (0.35) - vector similarity (understands meaning, not just tags)
+2. Department path (0.20) - folder proximity to agent's scope
 3. Recency (0.20) - 14-day half-life decay
-4. Mycelium activation (0.20) - spreading activation score
-5. Semantic/qmd (0.10) - vector similarity
-6. Hub score (0.05) - cross-functional importance
+4. Mycelium activation (0.20) - spreading activation from knowledge graph
+5. Hub score (0.05) - cross-functional importance
 """
 
 import math
@@ -18,13 +17,12 @@ from typing import Optional
 from . import vault_indexer
 
 
-# Scoring weights
+# Scoring weights -- semantic search is the primary signal
 WEIGHTS = {
-    "tag_match": 0.30,
-    "department": 0.15,
+    "semantic": 0.35,
+    "department": 0.20,
     "recency": 0.20,
     "mycelium": 0.20,
-    "semantic": 0.10,
     "hub": 0.05,
 }
 
@@ -38,11 +36,10 @@ class NoteScore:
     path: str
     title: str
     total: float
-    tag_match: float = 0.0
+    semantic: float = 0.0
     department: float = 0.0
     recency: float = 0.0
     mycelium: float = 0.0
-    semantic: float = 0.0
     hub: float = 0.0
 
     def to_dict(self) -> dict:
@@ -51,38 +48,13 @@ class NoteScore:
             "title": self.title,
             "total": round(self.total, 4),
             "components": {
-                "tag_match": round(self.tag_match, 4),
+                "semantic": round(self.semantic, 4),
                 "department": round(self.department, 4),
                 "recency": round(self.recency, 4),
                 "mycelium": round(self.mycelium, 4),
-                "semantic": round(self.semantic, 4),
                 "hub": round(self.hub, 4),
             },
         }
-
-
-def _score_tag_match(note: vault_indexer.NoteIndex, primary_tags: list[str], secondary_tags: list[str]) -> float:
-    """Score based on tag overlap with agent's owned tags."""
-    if not note.tags:
-        return 0.0
-
-    note_tags = set(t.lower() for t in note.tags)
-    primary_set = set(t.lower() for t in primary_tags)
-    secondary_set = set(t.lower() for t in secondary_tags)
-
-    primary_matches = len(note_tags & primary_set)
-    secondary_matches = len(note_tags & secondary_set)
-
-    if not primary_set and not secondary_set:
-        return 0.0
-
-    # Primary tags worth more
-    total_possible = len(primary_set) + len(secondary_set) * 0.5
-    if total_possible == 0:
-        return 0.0
-
-    score = (primary_matches + secondary_matches * 0.5) / total_possible
-    return min(score, 1.0)
 
 
 def _score_department(note_path: str, primary_folders: list[str], secondary_folders: list[str], excluded_folders: list[str]) -> float:
@@ -134,22 +106,21 @@ def _score_hub(note_path: str) -> float:
 
 def score_notes(
     vault_index: vault_indexer.VaultIndex,
-    primary_tags: list[str] = None,
-    secondary_tags: list[str] = None,
     primary_folders: list[str] = None,
     secondary_folders: list[str] = None,
     excluded_folders: list[str] = None,
     mycelium_scores: dict[str, float] = None,
     semantic_scores: dict[str, float] = None,
     weights: dict[str, float] = None,
+    # Legacy params (ignored, kept for backward compat)
+    primary_tags: list[str] = None,
+    secondary_tags: list[str] = None,
 ) -> list[NoteScore]:
     """
     Score all notes in the vault index for relevance to an agent.
 
     Args:
         vault_index: VaultIndex with all notes
-        primary_tags: Agent's primary tags
-        secondary_tags: Agent's secondary tags
         primary_folders: Agent's primary folders
         secondary_folders: Agent's secondary folders
         excluded_folders: Folders to exclude
@@ -160,8 +131,6 @@ def score_notes(
     Returns:
         List of NoteScore sorted by total score descending
     """
-    primary_tags = primary_tags or []
-    secondary_tags = secondary_tags or []
     primary_folders = primary_folders or []
     secondary_folders = secondary_folders or []
     excluded_folders = excluded_folders or []
@@ -176,7 +145,6 @@ def score_notes(
         if path.startswith(".") or path.startswith("_agents/"):
             continue
 
-        tag_score = _score_tag_match(note, primary_tags, secondary_tags)
         dept_score = _score_department(path, primary_folders, secondary_folders, excluded_folders)
         recency_score = _score_recency(note.mtime)
         mycelium_score = mycelium_scores.get(path, 0.0)
@@ -184,11 +152,10 @@ def score_notes(
         hub_score = _score_hub(path)
 
         total = (
-            w.get("tag_match", 0.30) * tag_score
-            + w.get("department", 0.15) * dept_score
+            w.get("semantic", 0.35) * semantic_score
+            + w.get("department", 0.20) * dept_score
             + w.get("recency", 0.20) * recency_score
             + w.get("mycelium", 0.20) * mycelium_score
-            + w.get("semantic", 0.10) * semantic_score
             + w.get("hub", 0.05) * hub_score
         )
 
@@ -196,11 +163,10 @@ def score_notes(
             path=path,
             title=note.title,
             total=total,
-            tag_match=tag_score,
+            semantic=semantic_score,
             department=dept_score,
             recency=recency_score,
             mycelium=mycelium_score,
-            semantic=semantic_score,
             hub=hub_score,
         ))
 
