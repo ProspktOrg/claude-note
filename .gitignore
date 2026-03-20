@@ -46,3 +46,6 @@ htmlcov/
 # Local development
 *.log
 .gitnexus
+
+.claude
+.omc

@@ -418,6 +418,69 @@ def cmd_classify(args) -> int:
     return 0
 
 
+def cmd_daily(args) -> int:
+    """Handle daily command - synthesize all sessions for a day."""
+    from . import daily_synthesis
+
+    if args.all:
+        dates = daily_synthesis.get_unprocessed_dates()
+        if not dates:
+            print("No unprocessed dates found.")
+            return 0
+        print(f"Found {len(dates)} unprocessed date(s): {', '.join(dates)}")
+        for date in dates:
+            print(f"\nSynthesizing {date}...")
+            result = daily_synthesis.synthesize_daily(
+                date=date,
+                model=args.model,
+                force=args.force,
+            )
+            _print_daily_result(result)
+    else:
+        date = args.date
+        if not date:
+            from datetime import datetime as _dt
+            date = _dt.utcnow().strftime("%Y-%m-%d")
+        print(f"Synthesizing {date}...")
+        result = daily_synthesis.synthesize_daily(
+            date=date,
+            model=args.model,
+            force=args.force,
+        )
+        _print_daily_result(result)
+
+    return 0
+
+
+def _print_daily_result(result: dict) -> None:
+    """Print daily synthesis result."""
+    if not result:
+        print("  No result")
+        return
+
+    status = result.get("status", "")
+    if status == "already_done":
+        print(f"  Already synthesized (use --force to re-run)")
+    elif status == "no_sessions":
+        print(f"  No session notes found for this date")
+    elif status == "no_content":
+        print(f"  Session notes are empty")
+    elif status == "error":
+        print(f"  Error: {result.get('error', 'unknown')}")
+    elif status == "ok":
+        print(f"  Sessions processed: {result.get('sessions_processed', 0)}")
+        print(f"  Concepts: {result.get('concepts', 0)}")
+        print(f"  Decisions: {result.get('decisions', 0)}")
+        print(f"  Open questions: {result.get('open_questions', 0)}")
+        print(f"  How-tos: {result.get('howtos', 0)}")
+        print(f"  Note ops: {result.get('note_ops', 0)}")
+        routing = result.get("routing", {})
+        if routing.get("notes_created"):
+            print(f"  Created: {', '.join(routing['notes_created'])}")
+        if routing.get("notes_updated"):
+            print(f"  Updated: {', '.join(routing['notes_updated'])}")
+
+
 def cmd_migrate(args) -> int:
     """Handle migrate command - flat to structured vault migration."""
     from . import migration
@@ -672,6 +735,27 @@ def main() -> int:
         help="Verbose output"
     )
     classify_parser.set_defaults(func=cmd_classify)
+
+    # daily command (v2)
+    daily_parser = subparsers.add_parser(
+        "daily", help="Daily knowledge synthesis (Stage 2: extract from session digests)"
+    )
+    daily_parser.add_argument(
+        "--date", "-d",
+        help="Date to synthesize (YYYY-MM-DD, default: today)"
+    )
+    daily_parser.add_argument(
+        "--all", action="store_true",
+        help="Process all unprocessed dates"
+    )
+    daily_parser.add_argument(
+        "--force", action="store_true",
+        help="Re-run even if already synthesized"
+    )
+    daily_parser.add_argument(
+        "--model", help="Override Claude model"
+    )
+    daily_parser.set_defaults(func=cmd_daily)
 
     # migrate command (v2)
     migrate_parser = subparsers.add_parser(

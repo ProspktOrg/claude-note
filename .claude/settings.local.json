@@ -109,7 +109,8 @@
       "Bash(git log:*)",
       "Bash(claude-note context:*)",
       "Bash(claude-note index:*)",
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "Bash(CLAUDE_NOTE_VAULT_ROOT=/tmp/cn-test-vault uv run pytest tests/ --tb=short)"
     ]
   }
 }

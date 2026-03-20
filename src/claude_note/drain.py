@@ -13,35 +13,23 @@ from . import queue_manager
 from . import session_tracker
 from . import note_writer
 from . import open_questions
-from . import synthesizer
-from . import note_router
-from . import vault_indexer
 
 
-def run_synthesis_for_drain(state) -> bool:
-    """Run synthesis for a session during drain."""
+def run_compact_for_drain(state) -> bool:
+    """Run compact (Stage 1) for a session during drain."""
     if config.SYNTH_MODE == "log":
         return False
 
-    if not state.transcript_path:
-        return False
-
     try:
-        vault_index = vault_indexer.get_index()
-        pack = synthesizer.synthesize_from_state(state, vault_index)
-
-        if pack is None or pack.is_empty():
-            return False
-
-        results = note_router.apply_note_ops(pack, mode=config.SYNTH_MODE)
-
-        if results["inbox_updated"]:
-            print(f"  Synthesized: {len(pack.concepts)} concepts, {len(pack.decisions)} decisions")
-
-        return True
-
+        import logging
+        logger = logging.getLogger("claude-note")
+        from . import worker as worker_module
+        result = worker_module.compact_session(state, logger)
+        if result:
+            print(f"  Compacted: {state.session_id[:8]}")
+        return result
     except Exception as e:
-        print(f"  Synthesis error: {e}")
+        print(f"  Compact error: {e}")
         return False
 
 
@@ -107,8 +95,8 @@ def drain_all() -> tuple:
                 if count > 0:
                     print(f"  Promoted {count} questions")
 
-                # Run synthesis (if enabled)
-                run_synthesis_for_drain(state)
+                # Compact session into digest (Stage 1)
+                run_compact_for_drain(state)
 
                 # Mark as written
                 session_tracker.mark_session_written(session_id)

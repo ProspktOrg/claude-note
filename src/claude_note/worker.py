@@ -7,7 +7,10 @@ Polls the queue and processes sessions when debounce expires.
 
 import argparse
 import logging
+import os
+import re
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -55,20 +58,93 @@ def handle_signal(signum, frame):
     _shutdown = True
 
 
-def update_session_summary(state: models.SessionState, pack, logger: logging.Logger) -> bool:
+
+def compact_session(state: models.SessionState, logger: logging.Logger) -> bool:
     """
-    Update session note's Summary section with synthesis results.
+    Stage 1: Compact a session into a digest (like /compact).
 
-    Args:
-        state: SessionState object
-        pack: KnowledgePack with synthesis results
-        logger: Logger instance
+    Reads the transcript and produces a concise summary appended to
+    the session note. Does NOT extract knowledge or route to vault --
+    that's the daily synthesis job (Stage 2).
 
-    Returns:
-        True if summary was updated
+    Returns True if digest was written.
     """
-    import re
+    if config.SYNTH_MODE == "log":
+        return False
 
+    if not state.transcript_path:
+        logger.debug(f"Session {state.session_id[:8]}: no transcript, skipping compact")
+        return False
+
+    try:
+        from . import transcript_reader
+
+        transcript = transcript_reader.read_transcript(state.transcript_path)
+        if not transcript.user_prompts:
+            return False
+
+        # Build a compact prompt -- just summarize, don't extract knowledge
+        user_prompts = "\n".join(
+            f"{i}. {p[:300]}" for i, p in enumerate(transcript.user_prompts[:20], 1)
+        )
+        files_list = ", ".join(transcript.files_touched[:20])
+
+        prompt = f"""Summarize this Claude Code session in a concise digest.
+
+## Session
+Working directory: {state.cwd or "unknown"}
+Date: {state.first_event_ts[:10] if state.first_event_ts else "unknown"}
+
+## User Prompts
+{user_prompts}
+
+## Files Touched
+{files_list}
+
+## Errors
+{chr(10).join(transcript.errors[:5]) if transcript.errors else "(None)"}
+
+## Output Format
+Write a concise session digest with these sections:
+- **What**: 1-2 sentences on what was accomplished
+- **Key Changes**: Bullet list of significant changes/decisions (max 5)
+- **Open Threads**: Anything left unresolved (max 3)
+- **Files Modified**: Key files that were changed
+
+Keep it SHORT. This digest will be processed later by a daily synthesis job.
+Output plain markdown only, no JSON, no code blocks."""
+
+        env = os.environ.copy()
+        env["CLAUDE_CODE_HOOKS_ENABLED"] = "false"
+
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--model", config.SYNTH_MODEL],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=config.SYNTH_TIMEOUT,
+        )
+
+        if result.returncode != 0:
+            logger.warning(f"Session {state.session_id[:8]}: compact failed: {result.stderr[:200]}")
+            return False
+
+        digest = result.stdout.strip()
+        if not digest:
+            return False
+
+        # Write digest to the session note's Summary section
+        update_session_summary_with_digest(state, digest, logger)
+        logger.info(f"Compacted session {state.session_id[:8]}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Compact failed for session {state.session_id[:8]}: {e}")
+        return False
+
+
+def update_session_summary_with_digest(state: models.SessionState, digest: str, logger: logging.Logger) -> bool:
+    """Replace the Summary placeholder in the session note with the digest."""
     try:
         note_path = note_writer.get_note_path(state)
         if not note_path.exists():
@@ -76,163 +152,25 @@ def update_session_summary(state: models.SessionState, pack, logger: logging.Log
 
         content = note_path.read_text(encoding="utf-8")
 
-        # Build summary content
-        summary_lines = [f"**{pack.title}**", ""]
-
-        if pack.highlights:
-            summary_lines.append("Key outcomes:")
-            for h in pack.highlights:
-                summary_lines.append(f"- {h}")
-            summary_lines.append("")
-
-        if pack.concepts:
-            summary_lines.append(f"Concepts: {', '.join(c.name for c in pack.concepts[:5])}")
-        if pack.decisions:
-            summary_lines.append(f"Decisions: {len(pack.decisions)}")
-        if pack.open_questions:
-            summary_lines.append(f"Open questions: {len(pack.open_questions)}")
-
-        summary_text = "\n".join(summary_lines)
-
-        # Replace placeholder in Summary section
-        # Look for the placeholder text
         placeholder = "(Updated on Stop/SessionEnd with session highlights)"
-
         if placeholder in content:
-            new_content = content.replace(placeholder, summary_text)
+            new_content = content.replace(placeholder, digest)
         else:
-            # Try to find and replace the Summary section content
+            # Try regex replace of Summary section
             pattern = r"(## Summary\n\n).*?(\n\n## )"
             match = re.search(pattern, content, re.DOTALL)
             if match:
-                new_content = content[:match.start()] + match.group(1) + summary_text + match.group(2) + content[match.end():]
+                new_content = content[:match.start()] + match.group(1) + digest + match.group(2) + content[match.end():]
             else:
-                # Couldn't find Summary section
                 return False
 
-        # Write atomically
         temp_path = note_path.with_suffix(".tmp")
         temp_path.write_text(new_content, encoding="utf-8")
         temp_path.replace(note_path)
-
-        logger.info(f"Updated session summary: {pack.title}")
         return True
 
     except Exception as e:
-        logger.error(f"Failed to update session summary: {e}")
-        return False
-
-
-def run_synthesis(state: models.SessionState, logger: logging.Logger) -> bool:
-    """
-    Run synthesis for a session.
-
-    Returns True if synthesis succeeded.
-    """
-    # Skip if mode is just logging
-    if config.SYNTH_MODE == "log":
-        return False
-
-    # Skip if no transcript
-    if not state.transcript_path:
-        logger.debug(f"Session {state.session_id[:8]}: no transcript, skipping synthesis")
-        return False
-
-    try:
-        # Get vault index
-        vault_index = vault_indexer.get_index()
-
-        # v2: Gather agent briefing, code intel, and graph context
-        agent_briefing = ""
-        code_intel_context = ""
-        graph_context = ""
-        agent_id = getattr(state, "agent_id", "")
-
-        if config.AGENT_ENABLED and agent_id:
-            try:
-                from . import briefing_generator
-                briefing_path = config.VAULT_ROOT / "_agents" / agent_id / "briefing.md"
-                if briefing_path.exists():
-                    agent_briefing = briefing_path.read_text(encoding="utf-8")[:4000]
-            except Exception:
-                pass
-
-        if config.GITNEXUS_ENABLED:
-            try:
-                from . import code_intel
-                enricher = code_intel.CodeIntelEnricher(state.cwd or ".")
-                intel_ctx = enricher.enrich_session(config.GITNEXUS_REF)
-                code_intel_context = enricher.format_for_prompt(intel_ctx)
-            except Exception:
-                pass
-
-        if config.MYCELIUM_ENABLED:
-            try:
-                from .mycelium import KnowledgeGraph, MyceliumRetrieval
-                graph = KnowledgeGraph(config.GRAPH_DIR)
-                graph.load()
-                retrieval = MyceliumRetrieval(graph)
-                from . import agent_config
-                profile = agent_config.get_current_agent()
-                activation = retrieval.get_activation_scores_for_agent(
-                    home_nodes=profile.home_nodes,
-                    owned_tags=profile.tags_primary,
-                )
-                if activation:
-                    top_activated = sorted(activation.items(), key=lambda x: x[1], reverse=True)[:10]
-                    graph_context = "Top activated notes:\n" + "\n".join(
-                        f"- {path} (score: {score:.2f})" for path, score in top_activated
-                    )
-            except Exception:
-                pass
-
-        # Run synthesis
-        logger.info(f"Synthesizing session {state.session_id[:8]}...")
-        pack = synthesizer.synthesize_from_state(state, vault_index)
-
-        if pack is None or pack.is_empty():
-            logger.info(f"Session {state.session_id[:8]}: no knowledge extracted")
-            return False
-
-        # Update session note summary with synthesis results
-        update_session_summary(state, pack, logger)
-
-        # Apply note ops
-        results = note_router.apply_note_ops(pack, mode=config.SYNTH_MODE)
-
-        # Log results
-        if results["inbox_updated"]:
-            logger.info(f"Updated inbox with {len(pack.concepts)} concepts, {len(pack.decisions)} decisions")
-        if results["notes_created"]:
-            logger.info(f"Created notes: {', '.join(results['notes_created'])}")
-        if results["notes_updated"]:
-            logger.info(f"Updated notes: {', '.join(results['notes_updated'])}")
-        if results["errors"]:
-            for err in results["errors"]:
-                logger.warning(f"Synthesis error: {err}")
-
-        # v2: Post-routing graph update
-        if config.MYCELIUM_ENABLED:
-            try:
-                from .mycelium import KnowledgeGraph
-                from .mycelium.graph_sync import GraphSynchronizer
-                graph = KnowledgeGraph(config.GRAPH_DIR)
-                graph.load()
-                session_path = note_writer.get_note_filename(state)
-                syncer = GraphSynchronizer(graph)
-                syncer.post_synthesis_sync(
-                    session_path,
-                    results.get("notes_created", []),
-                    results.get("notes_updated", []),
-                )
-                graph.save()
-            except Exception as e:
-                logger.debug(f"Graph update failed: {e}")
-
-        return True
-
-    except Exception as e:
-        logger.error(f"Synthesis failed for session {state.session_id[:8]}: {e}")
+        logger.error(f"Failed to write digest: {e}")
         return False
 
 
@@ -296,8 +234,9 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
                 if count > 0:
                     logger.info(f"Promoted {count} questions to open-questions.md")
 
-                # Run synthesis on Stop/SessionEnd (if enabled)
-                run_synthesis(state, logger)
+                # Compact session into digest (Stage 1)
+                # Knowledge extraction happens in daily synthesis (Stage 2)
+                compact_session(state, logger)
 
             # Mark as written (update state object directly, then save once)
             state.last_write_ts = datetime.utcnow().isoformat() + "Z"
